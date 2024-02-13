@@ -1,0 +1,14 @@
+[package]
+name = "cdn-systems-challenge"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mahor Foruzesh <mahorforuzesh@gmail.com>"]
+
+[dependencies]
+ndarray = "0.15.6"
+owo-colors = "4.0.0"
+rand = "0.8.5"
+
+[profile.release]
+lto = true
+strip = true
