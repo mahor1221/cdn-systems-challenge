@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["Mahor Foruzesh <mahorforuzesh@gmail.com>"]
 
 [dependencies]
+crossterm = "0.27.0"
 ndarray = "0.15.6"
 owo-colors = "4.0.0"
 rand = "0.8.5"

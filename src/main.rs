@@ -1,17 +1,27 @@
 // TODO: remove
 #![allow(dead_code)]
 
-use std::thread;
+use crossterm::{
+  cursor::MoveTo,
+  style::Print,
+  terminal::{Clear, ClearType},
+  ExecutableCommand,
+};
+use std::{io::stdout, thread, time::Duration};
 
 use position::*;
+use repairman::*;
 use world::*;
-
-use crate::repairman::Repairman;
 
 mod position {
   use crate::WorldConfig;
   use ndarray::{Dim, NdIndex};
-  use rand::{seq::SliceRandom, Rng};
+  use rand::{
+    distributions::{Distribution, Standard},
+    rngs::ThreadRng,
+    seq::SliceRandom,
+    Rng,
+  };
   use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
   #[derive(Clone, Copy, Debug)]
@@ -20,6 +30,17 @@ mod position {
     Left,
     Up,
     Down,
+  }
+
+  impl Distribution<MoveDirection> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> MoveDirection {
+      match rng.gen_range(0..=3) {
+        0 => MoveDirection::Right,
+        1 => MoveDirection::Left,
+        2 => MoveDirection::Up,
+        _ => MoveDirection::Down,
+      }
+    }
   }
 
   // To be able to derive traits without adding unnecessary constraints to
@@ -36,6 +57,18 @@ mod position {
     phantom: PhantomData<C>,
   }
 
+  impl<C: WorldConfig> Distribution<Position<C>> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Position<C> {
+      Position {
+        inner: PositionInner {
+          x: rng.gen_range(0..C::MAX_X),
+          y: rng.gen_range(0..C::MAX_Y),
+        },
+        phantom: PhantomData,
+      }
+    }
+  }
+
   impl<C: WorldConfig> Position<C> {
     pub fn new(x: usize, y: usize) -> Self {
       Self {
@@ -44,20 +77,9 @@ mod position {
       }
     }
 
-    pub fn new_random() -> Self {
-      let mut rng = rand::thread_rng();
-      Self {
-        inner: PositionInner {
-          x: rng.gen_range(0..C::MAX_X),
-          y: rng.gen_range(0..C::MAX_Y),
-        },
-        phantom: PhantomData,
-      }
-    }
-
-    pub fn new_random_set(len: usize) -> Vec<Self> {
+    pub fn new_random_set(rng: &mut ThreadRng, len: usize) -> Vec<Self> {
       let mut numbers: Vec<usize> = (0..C::MAX_X * C::MAX_Y).collect();
-      numbers.shuffle(&mut rand::thread_rng());
+      numbers.shuffle(rng);
       numbers.truncate(len);
       numbers
         .into_iter()
@@ -80,11 +102,11 @@ mod position {
           Some(())
         }
         MoveDirection::Up if self.inner.y < C::MAX_Y - 1 => {
-          self.inner.x += 1;
+          self.inner.y += 1;
           Some(())
         }
         MoveDirection::Down if self.inner.y > 0 => {
-          self.inner.x -= 1;
+          self.inner.y -= 1;
           Some(())
         }
         _ => None,
@@ -145,36 +167,37 @@ mod position {
   }
 }
 
-mod a {
-  use std::cell::UnsafeCell;
+// mod a {
+//   use std::cell::UnsafeCell;
 
-  #[derive(Copy, Clone)]
-  pub struct UnsafeSlice<'a, T> {
-    slice: &'a [UnsafeCell<T>],
-  }
-  unsafe impl<'a, T: Send + Sync> Send for UnsafeSlice<'a, T> {}
-  unsafe impl<'a, T: Send + Sync> Sync for UnsafeSlice<'a, T> {}
+//   #[derive(Copy, Clone)]
+//   pub struct UnsafeSlice<'a, T> {
+//     slice: &'a [UnsafeCell<T>],
+//   }
+//   unsafe impl<'a, T: Send + Sync> Send for UnsafeSlice<'a, T> {}
+//   unsafe impl<'a, T: Send + Sync> Sync for UnsafeSlice<'a, T> {}
 
-  impl<'a, T> UnsafeSlice<'a, T> {
-    pub fn new(slice: &'a mut [T]) -> Self {
-      let ptr = slice as *mut [T] as *const [UnsafeCell<T>];
-      Self {
-        slice: unsafe { &*ptr },
-      }
-    }
+//   impl<'a, T> UnsafeSlice<'a, T> {
+//     pub fn new(slice: &'a mut [T]) -> Self {
+//       let ptr = slice as *mut [T] as *const [UnsafeCell<T>];
+//       Self {
+//         slice: unsafe { &*ptr },
+//       }
+//     }
 
-    /// It's UB if two threads write to the same index without synchronization
-    pub unsafe fn write(&self, i: usize, value: T) {
-      let ptr = self.slice[i].get();
-      *ptr = value;
-    }
-  }
-}
+//     /// It's UB if two threads write to the same index without synchronization
+//     pub unsafe fn write(&self, i: usize, value: T) {
+//       let ptr = self.slice[i].get();
+//       *ptr = value;
+//     }
+//   }
+// }
 
 mod world {
   use crate::{MoveDirection, Position};
   use ndarray::Array2;
   use owo_colors::{OwoColorize, Style};
+  use rand::Rng;
   use std::{
     fmt::{Debug, Display, Error as FmtError, Formatter, Result as FmtResult, Write},
     sync::{Arc, Mutex, OnceLock},
@@ -188,7 +211,6 @@ mod world {
     const REPAIRMANS: usize = 4;
     const HOUSES_NEEDING_REPAIR: usize = 6;
 
-    // TODO: comment about #[inline(always)]
     fn house_repaired_style<'a>() -> &'a Style {
       HOUSE_REPAIRED_STYLE.get_or_init(|| {
         Style::new()
@@ -206,7 +228,7 @@ mod world {
     }
   }
 
-  #[derive(Clone, Copy, Default, Debug)]
+  #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
   pub enum HouseStatus {
     #[default]
     Repaired,
@@ -234,12 +256,13 @@ mod world {
         panic!("MAX_X * MAX_Y must be bigger than HOUSES_NEEDING_REPAIR")
       }
 
+      let rng = &mut rand::thread_rng();
       let repairmans = (0..C::REPAIRMANS)
-        .map(|_| Arc::new(Mutex::new(Position::new_random())))
+        .map(|_| Arc::new(Mutex::new(rng.gen())))
         .collect();
       let houses: Array2<Arc<Mutex<House>>> = Array2::default((C::MAX_Y, C::MAX_X));
 
-      for pos in Position::<C>::new_random_set(C::HOUSES_NEEDING_REPAIR) {
+      for pos in Position::<C>::new_random_set(rng, C::HOUSES_NEEDING_REPAIR) {
         let mut house = houses[pos].lock().unwrap_or_else(|_| unreachable!());
         house.status = HouseStatus::NeedsRepair;
       }
@@ -262,7 +285,7 @@ mod world {
       direction: MoveDirection,
     ) -> Option<Arc<Mutex<House>>> {
       let mut pos = self.repairmans[repairman_id].lock().ok()?;
-      pos.r#move(direction)?;
+      pos.r#move(direction);
       Some(Arc::clone(&self.houses[&*pos]))
     }
   }
@@ -291,29 +314,19 @@ mod world {
       Ok(())
     }
   }
-
-  // pub struct Controller<Move>
-  // where
-  //   Move: Fn(MoveDirection) -> Option<Arc<Mutex<House>>>,
-  // {
-  //   r#move: Move,
-  // }
-
-  // impl<Move> Controller<Move> {
-
-  // }
 }
 
 mod repairman {
   use crate::{House, HouseStatus, MoveDirection, Notes, Position, World, WorldConfig};
   use ndarray::Array2;
+  use rand::random;
   use std::{
-    fmt::Debug,
     marker::PhantomData,
     sync::{Arc, Mutex},
+    thread,
+    time::Duration,
   };
 
-  #[derive(Debug)]
   struct WorldMap<C: WorldConfig> {
     houses: Array2<HouseStatus>,
     phantom: PhantomData<C>,
@@ -349,16 +362,27 @@ mod repairman {
       }
     }
 
-    pub fn idle(&self) {}
+    pub fn work_loop(&mut self) -> Option<()> {
+      loop {
+        if self.house.lock().ok()?.status == HouseStatus::NeedsRepair {
+          self.repair();
+        }
+        let dir: MoveDirection = random();
+        self.r#move(dir).unwrap();
 
-    fn r#move(&self) {
-      // TODO: move according to map
-      // self.position = self.position.r#move(MoveDirection::Up)
-      todo!()
+        thread::sleep(Duration::from_secs(1));
+        // break Some(());
+      }
+    }
+
+    fn idle(&self) {}
+
+    fn r#move(&mut self, direction: MoveDirection) -> Option<()> {
+      self.house = (&self.fn_move)(direction)?;
+      Some(())
     }
 
     fn repair(&mut self) -> Option<()> {
-      // TODO: simulate work
       let pos = self.position.lock().ok()?;
       self.map.houses[&*pos] = HouseStatus::Repaired;
       self.house.lock().ok()?.status = HouseStatus::Repaired;
@@ -375,21 +399,31 @@ fn main() {
   // TODO: test HOUSES_NEEDING_REPAIR > MAX_X * MAX_Y
 
   struct City1;
-  impl WorldConfig for City1 {}
+  impl WorldConfig for City1 {
+    const MAX_X: usize = 14;
+    const MAX_Y: usize = 14;
+    const HOUSES_NEEDING_REPAIR: usize = 196;
+  }
+
   let city1 = World::<City1>::new();
 
-  let _: Vec<_> = thread::scope(|s| {
-    (0..City1::REPAIRMANS)
-      .map(|id| {
-        let repairman = Repairman::new(id, &city1);
+  let _ = thread::scope(|s| {
+    let city = &city1;
+    let handles: Vec<_> = (0..City1::REPAIRMANS)
+      .map(|id| s.spawn(move || Repairman::new(id, city).work_loop()))
+      .collect();
 
-        s.spawn(move || {
-          let a = repairman.idle();
-        })
-      })
-      .map(|h| h.join().unwrap())
-      .collect()
+    loop {
+      stdout()
+        .execute(Clear(ClearType::All))
+        .unwrap()
+        .execute(MoveTo(0, 0))
+        .unwrap()
+        .execute(Print(&city1))
+        .unwrap();
+      thread::sleep(Duration::from_secs(1));
+    }
+
+    // handles.into_iter().fold((), |(), h| h.join().unwrap());
   });
-
-  print!("{city1}");
 }
