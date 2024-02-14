@@ -21,39 +21,13 @@ use crossterm::{
 };
 use std::{collections::BTreeMap, io::stdout, thread, time::Duration};
 
-// mod a {
-//   use std::cell::UnsafeCell;
-
-//   #[derive(Copy, Clone)]
-//   pub struct UnsafeSlice<'a, T> {
-//     slice: &'a [UnsafeCell<T>],
-//   }
-//   unsafe impl<'a, T: Send + Sync> Send for UnsafeSlice<'a, T> {}
-//   unsafe impl<'a, T: Send + Sync> Sync for UnsafeSlice<'a, T> {}
-
-//   impl<'a, T> UnsafeSlice<'a, T> {
-//     pub fn new(slice: &'a mut [T]) -> Self {
-//       let ptr = slice as *mut [T] as *const [UnsafeCell<T>];
-//       Self {
-//         slice: unsafe { &*ptr },
-//       }
-//     }
-
-//     /// It's UB if two threads write to the same index without synchronization
-//     pub unsafe fn write(&self, i: usize, value: T) {
-//       let ptr = self.slice[i].get();
-//       *ptr = value;
-//     }
-//   }
-// }
-
 fn main() {
   // TODO: test new_random_set covers all world
   // TODO: test direction_to
   // TODO: test HOUSES_NEEDING_REPAIR > MAX_X * MAX_Y
   // TODO: doc comment on every function for proper usage and example doc test
   // TODO: explain why Array2 is used
-  // TODO: BTreeMap => HashMap
+  // TODO: check for memory leak
 
   struct City1;
   impl WorldConfig for City1 {
@@ -76,6 +50,11 @@ fn main() {
 
     let mut list: BTreeMap<Id, Notes> = BTreeMap::new();
     while handles.len() > 0 {
+      // The purpose of these two lines is to slow down the program for better
+      // visualization of the result, they can be removed otherwise.
+      barrier.wait();
+      thread::sleep(Duration::from_millis(300));
+
       stdout()
         .execute(Clear(ClearType::All))?
         .execute(MoveTo(0, 0))?
@@ -87,11 +66,6 @@ fn main() {
         let (id, notes) = h.join()??;
         list.insert(id, notes);
       }
-
-      // The purpose of these two lines is to slow down the program for better
-      // visualization of the result, they can be removed otherwise.
-      barrier.wait();
-      thread::sleep(Duration::from_millis(300));
     }
 
     Ok(list)

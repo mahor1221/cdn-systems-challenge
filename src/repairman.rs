@@ -2,7 +2,7 @@ use crate::{
   barrier::Barrier,
   error::CdnResult,
   position::{MoveDirection, Position},
-  world::{House, HouseStatus, Notes, World, WorldConfig},
+  world::{House, HouseStatus, Notes, SyncCell, World, WorldConfig},
 };
 use ndarray::Array2;
 use pathfinding::directed::bfs::bfs;
@@ -34,7 +34,7 @@ pub struct Repairman<'a, C: WorldConfig> {
   id: Id,
   world_map: Array2<MapStatus>,
   notes: Notes,
-  position: &'a Mutex<Position<C>>,
+  position: &'a SyncCell<Position<C>>,
   house: &'a Mutex<House>,
   barrier: Barrier,
   fn_move: FnMove<'a>,
@@ -81,8 +81,6 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
   }
 
   fn find_path(&self) -> CdnResult<PathFindingResult> {
-    let start_pos = self.position.lock()?;
-
     let successors = |pos: &Position<C>| {
       use MoveDirection::*;
       let mut vec = vec![Right, Left, Up, Down];
@@ -100,9 +98,11 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
     let success = |pos: &Position<C>| self.world_map[pos] == MapStatus::Unexplored;
 
     use PathFindingResult::*;
-    match bfs(&*start_pos, successors, success) {
+    match bfs(self.position.get(), successors, success) {
       Some(path) if path.len() < 2 => Ok(CurrentHouseIsUnexplored),
-      Some(path) => Ok(UnexploredHouseFound(start_pos.direction_to(&path[1]))),
+      Some(path) => Ok(UnexploredHouseFound(
+        self.position.get().direction_to(&path[1]),
+      )),
       None => Ok(NoUnexploredHouseFound),
     }
   }
@@ -116,7 +116,7 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
       }
 
       self.read_notes()?;
-      self.world_map[&*self.position.lock()?] = MapStatus::Explored;
+      self.world_map[self.position.get()] = MapStatus::Explored;
 
       use PathFindingResult::*;
       match self.find_path()? {

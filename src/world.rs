@@ -12,6 +12,31 @@ use std::{
   sync::{Mutex, OnceLock},
 };
 
+pub use self::sync_cell::SyncCell;
+mod sync_cell {
+  use std::cell::UnsafeCell;
+
+  #[derive(Debug)]
+  pub struct SyncCell<T>(UnsafeCell<T>);
+  unsafe impl<T: Send> Send for SyncCell<T> {}
+  unsafe impl<T: Sync> Sync for SyncCell<T> {}
+
+  impl<T> SyncCell<T> {
+    pub const fn new(value: T) -> Self {
+      Self(UnsafeCell::new(value))
+    }
+
+    pub fn get(&self) -> &T {
+      unsafe { &*self.0.get() }
+    }
+
+    /// It's UB if two threads write to the same value without synchronization
+    pub unsafe fn get_mut(&self) -> &mut T {
+      &mut *self.0.get()
+    }
+  }
+}
+
 static HOUSE_NEEDS_REPAIR_STYLE: OnceLock<OwoStyle> = OnceLock::new();
 static HOUSE_REPAIRED_STYLE: OnceLock<OwoStyle> = OnceLock::new();
 pub trait WorldConfig {
@@ -47,9 +72,6 @@ pub enum HouseStatus {
 #[derive(Default, Debug, Clone)]
 pub struct Notes(BTreeMap<Id, usize>);
 
-// The initial size of a new Vec is zero, so Notes doesn't allocate memory until
-// a Repairman pushes into it. The overhead of a grid of Houses should be very
-// minimal
 #[derive(Default, Debug)]
 pub struct House {
   pub notes: Notes,
@@ -59,7 +81,7 @@ pub struct House {
 #[derive(Debug)]
 pub struct World<C: WorldConfig> {
   houses: Array2<Mutex<House>>,
-  repairmans: Vec<Mutex<Position<C>>>,
+  repairmans: Vec<SyncCell<Position<C>>>,
 }
 
 impl<C: WorldConfig> World<C> {
@@ -69,7 +91,9 @@ impl<C: WorldConfig> World<C> {
     }
 
     let rng = &mut rand::thread_rng();
-    let repairmans = (0..C::REPAIRMANS).map(|_| Mutex::new(rng.gen())).collect();
+    let repairmans = (0..C::REPAIRMANS)
+      .map(|_| SyncCell::new(rng.gen()))
+      .collect();
 
     let houses: Array2<Mutex<House>> = Array2::default((C::MAX_Y, C::MAX_X));
     for pos in Position::<C>::new_random_set(rng, C::HOUSES_NEEDING_REPAIR) {
@@ -80,13 +104,13 @@ impl<C: WorldConfig> World<C> {
     Self { houses, repairmans }
   }
 
-  pub fn get_repairman_position(&self, id: Id) -> &Mutex<Position<C>> {
+  pub fn get_repairman_position(&self, id: Id) -> &SyncCell<Position<C>> {
     &self.repairmans[id]
   }
 
   pub fn get_repairman_house(&self, id: Id) -> &Mutex<House> {
-    let pos = self.repairmans[id].lock().unwrap();
-    &self.houses[&*pos]
+    let pos = self.repairmans[id].get();
+    &self.houses[pos]
   }
 
   pub fn move_repairman<'a>(
@@ -94,9 +118,8 @@ impl<C: WorldConfig> World<C> {
     id: Id,
     direction: MoveDirection,
   ) -> CdnResult<&'a Mutex<House>> {
-    let mut pos = self.repairmans[id].lock()?;
-    pos.r#move(direction)?;
-    Ok(&self.houses[&*pos])
+    unsafe { self.repairmans[id].get_mut().r#move(direction)? };
+    Ok(&self.houses[self.repairmans[id].get()])
   }
 }
 
@@ -105,11 +128,7 @@ impl<C: WorldConfig> Display for World<C> {
     for (y, row) in self.houses.outer_iter().enumerate() {
       for (x, house) in row.iter().enumerate() {
         let pos = Position::<C>::new(x, y);
-        let i = self
-          .repairmans
-          .iter()
-          .filter(|p| *p.lock().unwrap() == pos)
-          .count();
+        let i = self.repairmans.iter().filter(|p| *p.get() == pos).count();
         let repairmans_num = if i == 0 { "-".into() } else { i.to_string() };
 
         let s = match house.lock().map_err(|_| FmtError)?.status {
