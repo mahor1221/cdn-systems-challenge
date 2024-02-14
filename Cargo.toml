@@ -8,6 +8,7 @@ authors = ["Mahor Foruzesh <mahorforuzesh@gmail.com>"]
 crossterm = "0.27.0"
 ndarray = "0.15.6"
 owo-colors = "4.0.0"
+pathfinding = "4.9.1"
 rand = "0.8.5"
 
 [profile.release]

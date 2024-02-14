@@ -9,12 +9,61 @@ use crossterm::{
 };
 use std::{io::stdout, thread, time::Duration};
 
+use error::*;
 use position::*;
 use repairman::*;
 use world::*;
 
+mod error {
+  use std::{
+    any::Any,
+    error::Error,
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    io::Error as IoError,
+    sync::PoisonError,
+  };
+
+  // from std::thread::Result
+  pub type ThreadError = Box<dyn Any + Send + 'static>;
+
+  pub type CdnResult<T> = Result<T, CdnError>;
+
+  #[derive(Debug)]
+  pub enum CdnError {
+    InvalidMoveDirection,
+    PoisonError,
+    IoError(IoError),
+    ThreadError(ThreadError),
+  }
+
+  impl Error for CdnError {}
+  impl Display for CdnError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+      write!(f, "{self:?}")
+    }
+  }
+
+  impl<E> From<PoisonError<E>> for CdnError {
+    fn from(_: PoisonError<E>) -> Self {
+      CdnError::PoisonError
+    }
+  }
+
+  impl From<IoError> for CdnError {
+    fn from(e: IoError) -> Self {
+      CdnError::IoError(e)
+    }
+  }
+
+  impl From<Box<dyn Any + Send>> for CdnError {
+    fn from(e: Box<dyn Any + Send>) -> Self {
+      CdnError::ThreadError(e)
+    }
+  }
+}
+
 mod position {
-  use crate::WorldConfig;
+  use crate::{CdnError, CdnResult, WorldConfig};
   use ndarray::{Dim, NdIndex};
   use rand::{
     distributions::{Distribution, Standard},
@@ -46,7 +95,7 @@ mod position {
   // To be able to derive traits without adding unnecessary constraints to
   // the "C: WorldConfig" generic parameter, the non-generic part of Position
   // is separated into PositionInner.
-  #[derive(Debug, Default, PartialEq, Eq, Hash)]
+  #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
   struct PositionInner {
     x: usize,
     y: usize,
@@ -91,25 +140,36 @@ mod position {
       [self.inner.y, self.inner.x]
     }
 
-    pub fn r#move(&mut self, direction: MoveDirection) -> Option<()> {
+    pub fn r#move(&mut self, direction: MoveDirection) -> CdnResult<()> {
       match direction {
         MoveDirection::Right if self.inner.x < C::MAX_X - 1 => {
           self.inner.x += 1;
-          Some(())
         }
         MoveDirection::Left if self.inner.x > 0 => {
           self.inner.x -= 1;
-          Some(())
         }
         MoveDirection::Up if self.inner.y < C::MAX_Y - 1 => {
           self.inner.y += 1;
-          Some(())
         }
         MoveDirection::Down if self.inner.y > 0 => {
           self.inner.y -= 1;
-          Some(())
         }
-        _ => None,
+        _ => return Err(CdnError::InvalidMoveDirection),
+      }
+      Ok(())
+    }
+
+    pub fn direction_to(&self, other: &Self) -> MoveDirection {
+      if self.inner.x.checked_add(1) == Some(other.inner.x) {
+        MoveDirection::Right
+      } else if self.inner.x.checked_sub(1) == Some(other.inner.x) {
+        MoveDirection::Left
+      } else if self.inner.y.checked_add(1) == Some(other.inner.y) {
+        MoveDirection::Up
+      } else if self.inner.y.checked_sub(1) == Some(other.inner.y) {
+        MoveDirection::Down
+      } else {
+        panic!("self and other are not adjacent positions")
       }
     }
   }
@@ -117,6 +177,15 @@ mod position {
   //
   // boilerplate
   //
+
+  impl<C: WorldConfig> Clone for Position<C> {
+    fn clone(&self) -> Self {
+      Self {
+        inner: self.inner.clone(),
+        phantom: PhantomData,
+      }
+    }
+  }
 
   impl<C: WorldConfig> Debug for Position<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -194,13 +263,13 @@ mod position {
 // }
 
 mod world {
-  use crate::{MoveDirection, Position};
+  use crate::{CdnResult, MoveDirection, Position};
   use ndarray::Array2;
   use owo_colors::{OwoColorize, Style};
   use rand::Rng;
   use std::{
     fmt::{Debug, Display, Error as FmtError, Formatter, Result as FmtResult, Write},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Barrier, Mutex, OnceLock},
   };
 
   static HOUSE_NEEDS_REPAIR_STYLE: OnceLock<Style> = OnceLock::new();
@@ -246,8 +315,9 @@ mod world {
 
   #[derive(Debug)]
   pub struct World<C: WorldConfig> {
-    houses: Array2<Arc<Mutex<House>>>,
-    repairmans: Vec<Arc<Mutex<Position<C>>>>,
+    houses: Array2<Mutex<House>>,
+    repairmans: Vec<Mutex<Position<C>>>,
+    pub barrier: Barrier,
   }
 
   impl<C: WorldConfig> World<C> {
@@ -257,36 +327,42 @@ mod world {
       }
 
       let rng = &mut rand::thread_rng();
-      let repairmans = (0..C::REPAIRMANS)
-        .map(|_| Arc::new(Mutex::new(rng.gen())))
-        .collect();
-      let houses: Array2<Arc<Mutex<House>>> = Array2::default((C::MAX_Y, C::MAX_X));
+      let repairmans = (0..C::REPAIRMANS).map(|_| Mutex::new(rng.gen())).collect();
 
+      let houses: Array2<Mutex<House>> = Array2::default((C::MAX_Y, C::MAX_X));
       for pos in Position::<C>::new_random_set(rng, C::HOUSES_NEEDING_REPAIR) {
         let mut house = houses[pos].lock().unwrap_or_else(|_| unreachable!());
         house.status = HouseStatus::NeedsRepair;
       }
 
-      Self { houses, repairmans }
+      // The "+ 1" allows the main thread to control the program's speed, it
+      // can be removed otherwise.
+      let barrier = Barrier::new(C::REPAIRMANS + 1);
+
+      Self {
+        houses,
+        repairmans,
+        barrier,
+      }
     }
 
-    pub fn get_repairman_position(&self, repairman_id: usize) -> Arc<Mutex<Position<C>>> {
-      Arc::clone(&self.repairmans[repairman_id])
+    pub fn get_repairman_position(&self, id: usize) -> &Mutex<Position<C>> {
+      &self.repairmans[id]
     }
 
-    pub fn get_repairman_house(&self, repairman_id: usize) -> Arc<Mutex<House>> {
-      let pos = self.repairmans[repairman_id].lock().unwrap();
-      Arc::clone(&self.houses[&*pos])
+    pub fn get_repairman_house(&self, id: usize) -> &Mutex<House> {
+      let pos = self.repairmans[id].lock().unwrap();
+      &self.houses[&*pos]
     }
 
-    pub fn move_repairman(
-      &self,
-      repairman_id: usize,
+    pub fn move_repairman<'a>(
+      &'a self,
+      id: usize,
       direction: MoveDirection,
-    ) -> Option<Arc<Mutex<House>>> {
-      let mut pos = self.repairmans[repairman_id].lock().ok()?;
-      pos.r#move(direction);
-      Some(Arc::clone(&self.houses[&*pos]))
+    ) -> CdnResult<&'a Mutex<House>> {
+      let mut pos = self.repairmans[id].lock()?;
+      pos.r#move(direction)?;
+      Ok(&self.houses[&*pos])
     }
   }
 
@@ -317,37 +393,46 @@ mod world {
 }
 
 mod repairman {
-  use crate::{House, HouseStatus, MoveDirection, Notes, Position, World, WorldConfig};
+  use crate::{CdnResult, House, HouseStatus, MoveDirection, Notes, Position, World, WorldConfig};
   use ndarray::Array2;
-  use rand::random;
+  use pathfinding::directed::bfs::bfs;
+  use rand::{seq::SliceRandom, thread_rng};
   use std::{
     marker::PhantomData,
-    sync::{Arc, Mutex},
-    thread,
-    time::Duration,
+    sync::{Barrier, Mutex},
   };
 
+  #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+  enum MapStatus {
+    #[default]
+    Unexplored,
+    Explored,
+  }
+
   struct WorldMap<C: WorldConfig> {
-    houses: Array2<HouseStatus>,
+    houses: Array2<MapStatus>,
     phantom: PhantomData<C>,
   }
 
   impl<C: WorldConfig> Default for WorldMap<C> {
     fn default() -> Self {
       Self {
-        houses: Array2::from_elem((C::MAX_Y, C::MAX_X), HouseStatus::NeedsRepair),
+        houses: Array2::default((C::MAX_Y, C::MAX_X)),
         phantom: PhantomData,
       }
     }
   }
 
+  type FnMove<'a> = Box<dyn Fn(MoveDirection) -> CdnResult<&'a Mutex<House>> + 'a + Send + Sync>;
+
   pub struct Repairman<'a, C: WorldConfig> {
     id: usize,
     map: WorldMap<C>,
     notes: Notes,
-    position: Arc<Mutex<Position<C>>>,
-    house: Arc<Mutex<House>>,
-    fn_move: Box<dyn Fn(MoveDirection) -> Option<Arc<Mutex<House>>> + 'a + Send + Sync>,
+    position: &'a Mutex<Position<C>>,
+    house: &'a Mutex<House>,
+    barrier: &'a Barrier,
+    fn_move: FnMove<'a>,
   }
 
   impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
@@ -356,74 +441,112 @@ mod repairman {
         id,
         position: world.get_repairman_position(id),
         house: world.get_repairman_house(id),
+        barrier: &world.barrier,
         fn_move: Box::new(move |d| world.move_repairman(id, d)),
         map: Default::default(),
         notes: Default::default(),
       }
     }
 
-    pub fn work_loop(&mut self) -> Option<()> {
-      loop {
-        if self.house.lock().ok()?.status == HouseStatus::NeedsRepair {
-          self.repair();
-        }
-        let dir: MoveDirection = random();
-        self.r#move(dir).unwrap();
+    pub fn get_path_to_nearest_unexplored_house(&self) -> CdnResult<Option<Vec<Position<C>>>> {
+      let start = self.position.lock()?;
 
-        thread::sleep(Duration::from_secs(1));
-        // break Some(());
+      let successors = |pos: &Position<C>| {
+        use MoveDirection::*;
+        let mut vec = vec![Right, Left, Up, Down];
+        vec.shuffle(&mut thread_rng());
+        vec
+          .into_iter()
+          .filter_map(|d| {
+            let mut p = pos.clone();
+            p.r#move(d).ok()?;
+            Some(p)
+          })
+          .collect::<Vec<_>>()
+      };
+
+      let success = |pos: &Position<C>| self.map.houses[pos] == MapStatus::Unexplored;
+
+      Ok(bfs(&*start, successors, success))
+    }
+
+    pub fn work_loop(&mut self) -> CdnResult<()> {
+      loop {
+        if self.house.lock()?.status == HouseStatus::NeedsRepair {
+          self.repair()?;
+        }
+
+        {
+          let pos = &*self.position.lock()?;
+          self.map.houses[pos] = MapStatus::Explored;
+        }
+
+        match self.get_path_to_nearest_unexplored_house()? {
+          None => self.idle(),
+          Some(vec) => {
+            let dir = self.position.lock()?.direction_to(&vec[1]);
+            self.r#move(dir)?;
+          }
+        }
       }
     }
 
-    fn idle(&self) {}
-
-    fn r#move(&mut self, direction: MoveDirection) -> Option<()> {
-      self.house = (&self.fn_move)(direction)?;
-      Some(())
+    fn idle(&self) {
+      self.barrier.wait();
     }
 
-    fn repair(&mut self) -> Option<()> {
-      let pos = self.position.lock().ok()?;
-      self.map.houses[&*pos] = HouseStatus::Repaired;
-      self.house.lock().ok()?.status = HouseStatus::Repaired;
-      Some(())
+    fn r#move(&mut self, direction: MoveDirection) -> CdnResult<()> {
+      self.barrier.wait();
+      self.house = (&self.fn_move)(direction)?;
+      Ok(())
+    }
+
+    fn repair(&mut self) -> CdnResult<()> {
+      self.barrier.wait();
+      self.house.lock()?.status = HouseStatus::Repaired;
+      Ok(())
     }
   }
 }
 
 //
 
-fn main() {
+fn main() -> CdnResult<()> {
   // TODO: check REPAIRMANS < CPU COUNT
   // TODO: test new_random_set covers all world
   // TODO: test HOUSES_NEEDING_REPAIR > MAX_X * MAX_Y
+  // TODO: doc comment on every function for proper usage and example doc test
 
   struct City1;
-  impl WorldConfig for City1 {
-    const MAX_X: usize = 14;
-    const MAX_Y: usize = 14;
-    const HOUSES_NEEDING_REPAIR: usize = 196;
-  }
-
+  impl WorldConfig for City1 {}
   let city1 = World::<City1>::new();
 
-  let _ = thread::scope(|s| {
+  thread::scope(|s| -> CdnResult<()> {
     let city = &city1;
-    let handles: Vec<_> = (0..City1::REPAIRMANS)
+    let mut handles: Vec<_> = (0..City1::REPAIRMANS)
       .map(|id| s.spawn(move || Repairman::new(id, city).work_loop()))
       .collect();
 
-    loop {
+    let mut some_handle = handles.pop();
+    while let Some(handle) = some_handle {
       stdout()
-        .execute(Clear(ClearType::All))
-        .unwrap()
-        .execute(MoveTo(0, 0))
-        .unwrap()
-        .execute(Print(&city1))
-        .unwrap();
-      thread::sleep(Duration::from_secs(1));
+        .execute(Clear(ClearType::All))?
+        .execute(MoveTo(0, 0))?
+        .execute(Print(&city1))?;
+
+      if handle.is_finished() {
+        handle.join()??;
+        some_handle = handles.pop();
+      } else {
+        some_handle = Some(handle)
+      }
+
+      // The purpose of these two lines is to slow down the program for better
+      // visualization of the result, they can be removed otherwise.
+      city1.barrier.wait();
+      thread::sleep(Duration::from_millis(500));
     }
 
-    // handles.into_iter().fold((), |(), h| h.join().unwrap());
-  });
+    Ok(())
+  })
 }
