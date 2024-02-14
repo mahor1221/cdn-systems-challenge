@@ -6,12 +6,20 @@ use crate::{
 };
 use ndarray::Array2;
 use pathfinding::directed::bfs::bfs;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{random, seq::SliceRandom, thread_rng};
 use std::{
-  marker::PhantomData,
   ops::{Index, IndexMut},
   sync::Mutex,
 };
+
+enum PathFindingResult {
+  CurrentHouseIsUnexplored,
+  NoUnexploredHouseFound,
+  UnexploredHouseFound(MoveDirection),
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Id(usize);
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 enum MapStatus {
@@ -20,28 +28,11 @@ enum MapStatus {
   Explored,
 }
 
-struct WorldMap<C: WorldConfig> {
-  houses: Array2<MapStatus>,
-  phantom: PhantomData<C>,
-}
-
-impl<C: WorldConfig> Default for WorldMap<C> {
-  fn default() -> Self {
-    Self {
-      houses: Array2::default((C::MAX_Y, C::MAX_X)),
-      phantom: PhantomData,
-    }
-  }
-}
-
 type FnMove<'a> = Box<dyn Fn(MoveDirection) -> CdnResult<&'a Mutex<House>> + 'a + Send + Sync>;
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Id(usize);
 
 pub struct Repairman<'a, C: WorldConfig> {
   id: Id,
-  world_map: WorldMap<C>,
+  world_map: Array2<MapStatus>,
   notes: Notes,
   position: &'a Mutex<Position<C>>,
   house: &'a Mutex<House>,
@@ -57,44 +48,40 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
       position: world.get_repairman_position(id),
       house: world.get_repairman_house(id),
       fn_move: Box::new(move |dir| world.move_repairman(id, dir)),
-      world_map: Default::default(),
+      world_map: Array2::default((C::MAX_Y, C::MAX_X)),
       notes: Default::default(),
     };
 
     inner(id.into())
   }
 
-  pub fn work_loop(mut self) -> CdnResult<(Id, Notes)> {
-    while self.num_repaired() < C::HOUSES_NEEDING_REPAIR {
-      // TODO: test for deadlock
-      if self.house.lock()?.status == HouseStatus::NeedsRepair {
-        self.repair()?;
-      }
-
-      {
-        self.update_notes()?;
-        let pos = self.position.lock()?;
-        self.world_map.houses[&*pos] = MapStatus::Explored;
-      }
-
-      match self.get_path_to_nearest_unexplored_house()? {
-        None => self.idle(),
-        Some(vec) => {
-          let dir = self.position.lock()?.direction_to(&vec[1]);
-          self.r#move(dir)?;
-        }
-      }
-    }
-
-    Ok((self.id, self.notes))
-  }
-
-  pub fn num_repaired(&self) -> usize {
+  fn get_total_num_repaired(&self) -> usize {
     self.notes.as_ref().iter().fold(0, |r, (_, i)| r + *i)
   }
 
-  fn get_path_to_nearest_unexplored_house(&self) -> CdnResult<Option<Vec<Position<C>>>> {
-    let start = self.position.lock()?;
+  fn write_note(&self) -> CdnResult<()> {
+    if let Some(num_repaired) = self.notes.as_ref().get(&self.id) {
+      let mut house = self.house.lock()?;
+      house.notes.as_mut().insert(self.id, *num_repaired);
+    }
+    Ok(())
+  }
+
+  fn read_notes(&mut self) -> CdnResult<()> {
+    let house = self.house.lock()?;
+    for (id, num) in house.notes.as_ref() {
+      if *num > 0 {
+        let local_num = self.notes.as_mut().entry(*id).or_default();
+        if *local_num < *num {
+          *local_num = *num;
+        }
+      }
+    }
+    Ok(())
+  }
+
+  fn find_path(&self) -> CdnResult<PathFindingResult> {
+    let start_pos = self.position.lock()?;
 
     let successors = |pos: &Position<C>| {
       use MoveDirection::*;
@@ -110,23 +97,36 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
         .collect::<Vec<_>>()
     };
 
-    let success = |pos: &Position<C>| self.world_map.houses[pos] == MapStatus::Unexplored;
+    let success = |pos: &Position<C>| self.world_map[pos] == MapStatus::Unexplored;
 
-    Ok(bfs(&*start, successors, success))
+    use PathFindingResult::*;
+    match bfs(&*start_pos, successors, success) {
+      Some(path) if path.len() < 2 => Ok(CurrentHouseIsUnexplored),
+      Some(path) => Ok(UnexploredHouseFound(start_pos.direction_to(&path[1]))),
+      None => Ok(NoUnexploredHouseFound),
+    }
   }
 
-  fn update_notes(&mut self) -> CdnResult<()> {
-    for (id, num_repaired) in self.house.lock()?.notes.as_ref() {
-      if *id != self.id {
-        let num_repaired = *num_repaired;
-        let local_num_repaired = self.notes.as_mut().entry(*id).or_default();
-        if *local_num_repaired < num_repaired {
-          *local_num_repaired = num_repaired;
-        }
+  pub fn work_loop(mut self) -> CdnResult<(Id, Notes)> {
+    while self.get_total_num_repaired() < C::HOUSES_NEEDING_REPAIR {
+      let status = self.house.lock()?.status;
+      match status {
+        HouseStatus::NeedsRepair => self.repair_and_write_note()?,
+        HouseStatus::Repaired => self.write_note()?,
+      }
+
+      self.read_notes()?;
+      self.world_map[&*self.position.lock()?] = MapStatus::Explored;
+
+      use PathFindingResult::*;
+      match self.find_path()? {
+        CurrentHouseIsUnexplored => unreachable!(),
+        UnexploredHouseFound(dir) => self.r#move(dir)?,
+        NoUnexploredHouseFound => self.r#move(random()).unwrap_or(()),
       }
     }
 
-    Ok(())
+    Ok((self.id, self.notes))
   }
 
   //
@@ -143,13 +143,21 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
     Ok(())
   }
 
-  fn repair(&mut self) -> CdnResult<()> {
+  fn repair_and_write_note(&mut self) -> CdnResult<()> {
     self.barrier.wait();
-    let num_repaired = self.notes.as_mut().entry(self.id).or_default();
-    *num_repaired += 1;
     let mut house = self.house.lock()?;
-    *house.notes.as_mut().entry(self.id).or_default() = *num_repaired;
-    house.status = HouseStatus::Repaired;
+    match house.status {
+      HouseStatus::NeedsRepair => {
+        let num_repaired = self.notes.as_mut().entry(self.id).or_default();
+        *num_repaired += 1;
+        *house.notes.as_mut().entry(self.id).or_default() = *num_repaired;
+        house.status = HouseStatus::Repaired;
+      }
+      HouseStatus::Repaired => {
+        drop(house);
+        self.write_note()?;
+      }
+    }
     Ok(())
   }
 }

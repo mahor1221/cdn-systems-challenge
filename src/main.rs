@@ -10,8 +10,8 @@ mod world;
 use crate::{
   barrier::Barrier,
   error::CdnResult,
-  repairman::Repairman,
-  world::{World, WorldConfig},
+  repairman::{Id, Repairman},
+  world::{Notes, World, WorldConfig},
 };
 use crossterm::{
   cursor::MoveTo,
@@ -19,7 +19,7 @@ use crossterm::{
   terminal::{Clear, ClearType},
   ExecutableCommand,
 };
-use std::{io::stdout, thread, time::Duration};
+use std::{collections::BTreeMap, io::stdout, thread, time::Duration};
 
 // mod a {
 //   use std::cell::UnsafeCell;
@@ -57,10 +57,10 @@ fn main() {
 
   struct City1;
   impl WorldConfig for City1 {
-    const MAX_X: usize = 10;
-    const MAX_Y: usize = 10;
-    const REPAIRMANS: usize = 10;
-    const HOUSES_NEEDING_REPAIR: usize = 100;
+    const MAX_X: usize = 7;
+    const MAX_Y: usize = 7;
+    const REPAIRMANS: usize = 4;
+    const HOUSES_NEEDING_REPAIR: usize = 6;
   }
   let city1 = World::<City1>::new();
 
@@ -74,33 +74,38 @@ fn main() {
       handles.push(h)
     }
 
-    let mut some_handle = handles.pop();
-    let mut notes = Vec::new();
-    while let Some(handle) = some_handle {
+    let mut list: BTreeMap<Id, Notes> = BTreeMap::new();
+    while handles.len() > 0 {
       stdout()
         .execute(Clear(ClearType::All))?
         .execute(MoveTo(0, 0))?
         .execute(Print(&city1))?;
 
-      if handle.is_finished() {
-        let n = handle.join()??;
-        notes.push(n);
-        some_handle = handles.pop();
-      } else {
-        some_handle = Some(handle)
+      let (finished, rest): (Vec<_>, Vec<_>) = handles.into_iter().partition(|h| h.is_finished());
+      handles = rest;
+      for h in finished {
+        let (id, notes) = h.join()??;
+        list.insert(id, notes);
       }
 
       // The purpose of these two lines is to slow down the program for better
       // visualization of the result, they can be removed otherwise.
       barrier.wait();
-      thread::sleep(Duration::from_millis(100));
+      thread::sleep(Duration::from_millis(300));
     }
 
-    Ok(notes)
+    Ok(list)
   });
 
   match result {
-    Ok(notes) => notes.into_iter().for_each(|note| println!("{note:?}")),
     Err(e) => eprintln!("{e}"),
+    Ok(list) => {
+      for (id, notes) in list {
+        let t = notes.as_ref().iter().fold(0, |t, (_, n)| t + n);
+        let r = notes.as_ref().get(&id).cloned().unwrap_or_default();
+        let v: Vec<_> = notes.as_ref().iter().map(|n| *n.1).collect();
+        println!("{id:2?}, Repaired({r:2}). Notes({v:?}), Total({t})");
+      }
+    }
   }
 }
