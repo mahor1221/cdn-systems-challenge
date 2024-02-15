@@ -31,7 +31,6 @@ enum MapStatus {
 
 type FnMove<'a> = Box<dyn Fn(MoveDirection) -> CdnResult<&'a Mutex<House>> + 'a>;
 
-///
 pub struct Repairman<'a, C: WorldConfig> {
   id: Id,
   world_map: Array2<MapStatus>,
@@ -44,7 +43,10 @@ pub struct Repairman<'a, C: WorldConfig> {
 
 impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
   /// Creates a new Repairman. [`Barrier`] is used for communication between
-  /// repairmen. It's undefined behavior if two repairmen use the same `Id`.
+  /// repairmen.
+  ///
+  /// # Safety
+  /// Two repairmen must not use the same `Id`
   pub unsafe fn new(id: impl Into<Id>, barrier: Barrier, world: &'a World<C>) -> Self {
     let inner = |id| Self {
       id,
@@ -56,7 +58,7 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
       // The move_repairman method is implemented as a closure to ensure that
       // each repairman can only modify their own position.
       // This is done to comply with the challenge rules.
-      fn_move: Box::new(move |dir| unsafe { world.move_repairman(id, dir) }),
+      fn_move: Box::new(move |dir| world.move_repairman(id, dir)),
     };
 
     inner(id.into())
@@ -163,7 +165,7 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
   fn r#move(&mut self, direction: MoveDirection) -> CdnResult<()> {
     self.barrier.wait();
 
-    self.house = (&self.fn_move)(direction)?;
+    self.house = (self.fn_move)(direction)?;
     Ok(())
   }
 

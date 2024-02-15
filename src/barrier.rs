@@ -122,7 +122,7 @@ impl Default for Barrier {
 
 impl fmt::Debug for Barrier {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let num_threads: &usize = &*self.inner.num_threads.lock().unwrap();
+    let num_threads: &usize = &self.inner.num_threads.lock().unwrap();
     f.debug_struct("Barrier")
       .field("num_threads", num_threads)
       .finish_non_exhaustive()

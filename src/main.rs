@@ -64,7 +64,7 @@ impl<C: WorldConfig + Sync> World<C> {
 
       let mut list = List::default();
       stdout().execute(Clear(ClearType::All))?;
-      while handles.len() > 0 {
+      while !handles.is_empty() {
         stdout().execute(MoveTo(0, 0))?.execute(Print(&self))?;
 
         let (finished, rest): (Vec<_>, Vec<_>) = handles.into_iter().partition(|h| h.is_finished());
@@ -89,7 +89,7 @@ impl Display for List {
   fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
     let mut total = 0;
     for (id, notes) in &self.0 {
-      let r = notes.as_ref().get(&id).cloned().unwrap_or_default();
+      let r = notes.as_ref().get(id).cloned().unwrap_or_default();
       let n: Vec<_> = notes.as_ref().iter().map(|n| *n.1).collect();
       let s = notes.as_ref().iter().fold(0, |s, (_, n)| s + n);
       writeln!(f, "{id:2?}, Repaired({r:2}), Notes({n:?}), NotesSum({s})")?;

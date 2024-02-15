@@ -65,6 +65,15 @@ pub struct World<C: WorldConfig> {
   repairmen: Vec<SyncCell<Position<C>>>,
 }
 
+impl<C: WorldConfig> Default for World<C> {
+  fn default() -> Self {
+    Self {
+      repairmen: (0..C::REPAIRMEN).map(|_| Default::default()).collect(),
+      houses: Array2::default((C::MAX_LEN_Y, C::MAX_LEN_X)),
+    }
+  }
+}
+
 impl<C: WorldConfig> World<C> {
   /// Creates a new world with houses requiring repair and repairmen scattered
   /// randomly across it.
@@ -91,24 +100,28 @@ impl<C: WorldConfig> World<C> {
     self.repairmen.iter().enumerate().map(|(id, _)| id.into())
   }
 
+  /// # Safety
   /// This is safe if [`Self::move_repairman`] is used correctly.
-  pub fn get_repairman_position(&self, id: Id) -> &Position<C> {
-    unsafe { &self.repairmen[id].get() }
+  pub unsafe fn get_repairman_position(&self, id: Id) -> &Position<C> {
+    self.repairmen[id].get()
   }
 
+  /// # Safety
   /// This is safe if [`Self::move_repairman`] is used correctly.
-  pub fn get_repairman_house(&self, id: Id) -> &Mutex<House> {
-    let pos = unsafe { self.repairmen[id].get() };
+  pub unsafe fn get_repairman_house(&self, id: Id) -> &Mutex<House> {
+    let pos = self.repairmen[id].get();
     &self.houses[pos]
   }
 
-  /// It's UB if two threads use the same [`Id`] without synchronization.
-  pub unsafe fn move_repairman<'a>(
-    &'a self,
+  /// # Safety
+  /// Two threads must not pass the same [`Id`] to this method without
+  /// synchronization.
+  pub unsafe fn move_repairman(
+    &self,
     id: Id,
     direction: MoveDirection,
-  ) -> CdnResult<&'a Mutex<House>> {
-    unsafe { self.repairmen[id].get_mut().r#move(direction)? };
+  ) -> CdnResult<&Mutex<House>> {
+    self.repairmen[id].get_mut().r#move(direction)?;
     Ok(&self.houses[self.repairmen[id].get()])
   }
 }
@@ -139,11 +152,11 @@ impl<C: WorldConfig> Display for World<C> {
 //  SyncCell
 //
 
-/// This is a simple wrapper around [`std::cell::UnsafeCell`], which is
-/// zero-cost and adds no overhead to the program.
 mod sync_cell {
   use std::cell::UnsafeCell;
 
+  /// This is a simple wrapper around [`std::cell::UnsafeCell`]. In comparison
+  /// with Mutex, it's zero-cost and adds no overhead to the program.
   #[derive(Debug)]
   pub struct SyncCell<T>(UnsafeCell<T>);
   unsafe impl<T: Sync> Sync for SyncCell<T> {}
@@ -162,6 +175,7 @@ mod sync_cell {
 
     /// It's UB if two threads write to the same value without synchronization.
     #[inline(always)]
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut(&self) -> &mut T {
       &mut *self.0.get()
     }
@@ -196,7 +210,6 @@ pub mod test {
 
   use super::{HouseStatus, World, WorldConfig};
   use crate::position::{MoveDirection, Position};
-  use ndarray::Array2;
   use owo_colors::Style as OwoStyle;
 
   static HOUSE_NEEDS_REPAIR_STYLE: OnceLock<OwoStyle> = OnceLock::new();
@@ -209,20 +222,11 @@ pub mod test {
     const HOUSES_NEEDING_REPAIR: usize = 6;
 
     fn house_repaired_style<'a>() -> &'a OwoStyle {
-      HOUSE_REPAIRED_STYLE.get_or_init(|| OwoStyle::new())
+      HOUSE_REPAIRED_STYLE.get_or_init(OwoStyle::new)
     }
 
     fn house_needs_repair_style<'a>() -> &'a OwoStyle {
       HOUSE_NEEDS_REPAIR_STYLE.get_or_init(|| OwoStyle::new().bold())
-    }
-  }
-
-  impl<C: WorldConfig> Default for World<C> {
-    fn default() -> Self {
-      Self {
-        repairmen: (0..C::REPAIRMEN).map(|_| Default::default()).collect(),
-        houses: Array2::default((C::MAX_LEN_Y, C::MAX_LEN_X)),
-      }
     }
   }
 
@@ -245,7 +249,7 @@ pub mod test {
 
     let world = World::<Tst>::default();
     for id in world.get_repairmen_ids() {
-      let repairman_pos = world.get_repairman_position(id);
+      let repairman_pos = unsafe { world.get_repairman_position(id) };
       assert_eq!(*repairman_pos, pos1);
       unsafe { world.move_repairman(id, MoveDirection::Right).unwrap() };
       assert_eq!(*repairman_pos, pos2);
