@@ -49,7 +49,7 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
       position: world.get_repairman_position(id),
       house: world.get_repairman_house(id),
       fn_move: Box::new(move |dir| unsafe { world.move_repairman(id, dir) }),
-      world_map: Array2::default((C::MAX_Y, C::MAX_X)),
+      world_map: Array2::default((C::MAX_LEN_Y, C::MAX_LEN_X)),
       notes: Default::default(),
     };
 
@@ -101,11 +101,9 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
   fn read_notes(&mut self) -> CdnResult<()> {
     let house = self.house.lock()?;
     for (id, num) in house.notes.as_ref() {
-      if *num > 0 {
-        let local_num = self.notes.as_mut().entry(*id).or_default();
-        if *local_num < *num {
-          *local_num = *num;
-        }
+      let local_num = self.notes.as_mut().entry(*id).or_default();
+      if *local_num < *num {
+        *local_num = *num;
       }
     }
     Ok(())
@@ -198,5 +196,53 @@ impl<T> Index<Id> for Vec<T> {
 impl<T> IndexMut<Id> for Vec<T> {
   fn index_mut(&mut self, index: Id) -> &mut Self::Output {
     &mut self[*index.as_ref()]
+  }
+}
+
+#[cfg(test)]
+mod test {
+  use super::Repairman;
+  use crate::{
+    barrier::Barrier,
+    world::{test::Tst, World},
+  };
+
+  #[test]
+  fn test_wrote_note() {
+    let world = World::<Tst>::default();
+    let id = 0.into();
+    let mut man = unsafe { Repairman::new(id, Barrier::new(), &world) };
+
+    man.write_note().unwrap();
+    let num = man.house.lock().unwrap().notes.as_ref().get(&id).cloned();
+    assert!(num.is_none());
+
+    const TEST_NUM: usize = 3;
+    man.notes.as_mut().insert(id, TEST_NUM);
+    man.write_note().unwrap();
+    let num = *man.house.lock().unwrap().notes.as_ref().get(&id).unwrap();
+    assert_eq!(TEST_NUM, num);
+  }
+
+  #[test]
+  fn test_read_notes() {
+    let world = World::<Tst>::default();
+    let mut man = unsafe { Repairman::new(0, Barrier::new(), &world) };
+
+    // only the bigger values must remain
+    let mut house = man.house.lock().unwrap();
+    let other_id1 = 3.into();
+    let other_id2 = 4.into();
+    house.notes.as_mut().insert(other_id1, 7);
+    house.notes.as_mut().insert(other_id2, 10);
+    man.notes.as_mut().insert(other_id1, 5);
+    man.notes.as_mut().insert(other_id2, 12);
+    drop(house);
+
+    man.read_notes().unwrap();
+    let num1 = *man.notes.as_ref().get(&other_id1).unwrap();
+    let num2 = *man.notes.as_ref().get(&other_id2).unwrap();
+    assert_eq!(7, num1);
+    assert_eq!(12, num2);
   }
 }
