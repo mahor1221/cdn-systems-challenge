@@ -12,39 +12,11 @@ use std::{
   sync::{Mutex, OnceLock},
 };
 
-pub use self::sync_cell::SyncCell;
-mod sync_cell {
-  use std::cell::UnsafeCell;
-
-  #[derive(Debug)]
-  pub struct SyncCell<T>(UnsafeCell<T>);
-  unsafe impl<T: Sync> Sync for SyncCell<T> {}
-
-  impl<T> SyncCell<T> {
-    #[inline(always)]
-    pub const fn new(value: T) -> Self {
-      Self(UnsafeCell::new(value))
-    }
-
-    /// It's UB if the inner value gets deallocated while &T is alive
-    #[inline(always)]
-    pub unsafe fn get(&self) -> &T {
-      unsafe { &*self.0.get() }
-    }
-
-    /// It's UB if two threads write to the same value without synchronization
-    #[inline(always)]
-    pub unsafe fn get_mut(&self) -> &mut T {
-      &mut *self.0.get()
-    }
-  }
-}
-
 static HOUSE_NEEDS_REPAIR_STYLE: OnceLock<OwoStyle> = OnceLock::new();
 static HOUSE_REPAIRED_STYLE: OnceLock<OwoStyle> = OnceLock::new();
 pub trait WorldConfig {
-  const MAX_X: usize = 7;
-  const MAX_Y: usize = 7;
+  const MAX_LEN_X: usize = 7;
+  const MAX_LEN_Y: usize = 7;
   const REPAIRMANS: usize = 4;
   const HOUSES_NEEDING_REPAIR: usize = 6;
 
@@ -89,20 +61,20 @@ pub struct World<C: WorldConfig> {
 
 impl<C: WorldConfig> World<C> {
   pub fn new() -> Self {
-    if C::MAX_X * C::MAX_Y < C::HOUSES_NEEDING_REPAIR {
+    if C::MAX_LEN_X * C::MAX_LEN_Y < C::HOUSES_NEEDING_REPAIR {
       panic!("MAX_X * MAX_Y must be bigger than HOUSES_NEEDING_REPAIR")
     }
 
     let rng = &mut rand::thread_rng();
-    let repairmans = (0..C::REPAIRMANS)
-      .map(|_| SyncCell::new(rng.gen()))
-      .collect();
-
-    let houses: Array2<Mutex<House>> = Array2::default((C::MAX_Y, C::MAX_X));
+    let houses: Array2<Mutex<House>> = Array2::default((C::MAX_LEN_Y, C::MAX_LEN_X));
     for pos in Position::<C>::new_random_set(rng, C::HOUSES_NEEDING_REPAIR) {
       let mut house = houses[pos].lock().unwrap_or_else(|_| unreachable!());
       house.status = HouseStatus::NeedsRepair;
     }
+
+    let repairmans = (0..C::REPAIRMANS)
+      .map(|_| SyncCell::new(rng.gen()))
+      .collect();
 
     Self { houses, repairmans }
   }
@@ -156,6 +128,44 @@ impl<C: WorldConfig> Display for World<C> {
 }
 
 //
+//  SyncCell
+//
+
+pub use self::sync_cell::SyncCell;
+mod sync_cell {
+  use std::cell::UnsafeCell;
+
+  #[derive(Debug)]
+  pub struct SyncCell<T>(UnsafeCell<T>);
+  unsafe impl<T: Sync> Sync for SyncCell<T> {}
+
+  impl<T> SyncCell<T> {
+    #[inline(always)]
+    pub const fn new(value: T) -> Self {
+      Self(UnsafeCell::new(value))
+    }
+
+    /// It's UB if the inner value gets deallocated while &T is alive
+    #[inline(always)]
+    pub unsafe fn get(&self) -> &T {
+      unsafe { &*self.0.get() }
+    }
+
+    /// It's UB if two threads write to the same value without synchronization
+    #[inline(always)]
+    pub unsafe fn get_mut(&self) -> &mut T {
+      &mut *self.0.get()
+    }
+  }
+
+  impl<T: Default> Default for SyncCell<T> {
+    fn default() -> Self {
+      Self(UnsafeCell::new(T::default()))
+    }
+  }
+}
+
+//
 // boilerplate
 //
 
@@ -168,5 +178,78 @@ impl AsRef<BTreeMap<Id, usize>> for Notes {
 impl AsMut<BTreeMap<Id, usize>> for Notes {
   fn as_mut(&mut self) -> &mut BTreeMap<Id, usize> {
     &mut self.0
+  }
+}
+
+#[cfg(test)]
+pub mod test {
+  use std::sync::OnceLock;
+
+  use super::{HouseStatus, World, WorldConfig};
+  use crate::position::{MoveDirection, Position};
+  use ndarray::Array2;
+  use owo_colors::Style as OwoStyle;
+
+  static HOUSE_NEEDS_REPAIR_STYLE: OnceLock<OwoStyle> = OnceLock::new();
+  static HOUSE_REPAIRED_STYLE: OnceLock<OwoStyle> = OnceLock::new();
+  pub struct Tst;
+  impl WorldConfig for Tst {
+    const MAX_LEN_X: usize = 4;
+    const MAX_LEN_Y: usize = 3;
+    const REPAIRMANS: usize = 3;
+    const HOUSES_NEEDING_REPAIR: usize = 6;
+
+    fn house_repaired_style<'a>() -> &'a OwoStyle {
+      HOUSE_REPAIRED_STYLE.get_or_init(|| OwoStyle::new())
+    }
+
+    fn house_needs_repair_style<'a>() -> &'a OwoStyle {
+      HOUSE_NEEDS_REPAIR_STYLE.get_or_init(|| OwoStyle::new().bold())
+    }
+  }
+
+  impl<C: WorldConfig> Default for World<C> {
+    fn default() -> Self {
+      Self {
+        repairmans: (0..C::REPAIRMANS).map(|_| Default::default()).collect(),
+        houses: Array2::default((C::MAX_LEN_Y, C::MAX_LEN_X)),
+      }
+    }
+  }
+
+  #[test]
+  #[should_panic]
+  fn test_new_world() {
+    struct WrongConfig;
+    impl WorldConfig for WrongConfig {
+      const MAX_LEN_X: usize = 2;
+      const MAX_LEN_Y: usize = 2;
+      const HOUSES_NEEDING_REPAIR: usize = 5;
+    }
+    World::<WrongConfig>::new();
+  }
+
+  #[test]
+  fn test_move_repairman() {
+    let pos1 = Position::new(0, 0);
+    let pos2 = Position::new(1, 0);
+
+    let world = World::<Tst>::default();
+    for id in world.get_repairmans_ids() {
+      let repairman_pos = world.get_repairman_position(id);
+      assert_eq!(*repairman_pos, pos1);
+      unsafe { world.move_repairman(id, MoveDirection::Right).unwrap() };
+      assert_eq!(*repairman_pos, pos2);
+    }
+  }
+
+  #[test]
+  fn test_display_world() {
+    let world = World::<Tst>::default();
+    world.houses[[2, 3]].lock().unwrap().status = HouseStatus::NeedsRepair;
+    unsafe { *world.repairmans[1].get_mut() = Position::new(2, 1) };
+
+    let s = " 2 - - -\n - - 1 -\n - - - \u{1b}[1m-\u{1b}[0m\n";
+    assert_eq!(s, &world.to_string());
   }
 }
