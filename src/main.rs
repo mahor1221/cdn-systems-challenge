@@ -1,15 +1,10 @@
-// TODO: test new_random_set covers all world
-// TODO: test direction_to
-// TODO: test HOUSES_NEEDING_REPAIR > MAX_X * MAX_Y
-// TODO: doc comment on every function for proper usage and example doc test
 // TODO: explain why Array2 is used
-// TODO: check for memory leak
 
 mod barrier;
-mod error;
-mod position;
-mod repairman;
-mod world;
+pub mod error;
+pub mod position;
+pub mod repairman;
+pub mod world;
 
 use crate::{
   barrier::Barrier,
@@ -31,36 +26,39 @@ use std::{
   time::Duration,
 };
 
-const FRAME_DURATION_MS: u64 = 500;
-
 fn main() {
   struct City1;
-  impl WorldConfig for City1 {}
-  // impl WorldConfig for City1 {
-  //   const MAX_X: usize = 87;
-  //   const MAX_Y: usize = 44;
-  //   const REPAIRMANS: usize = 10;
-  //   const HOUSES_NEEDING_REPAIR: usize = 3828;
-  // }
+  impl WorldConfig for City1 {
+    // const MAX_LEN_X: usize = 7;
+    // const MAX_LEN_Y: usize = 7;
+    // const REPAIRMEN: usize = 4;
+    // const HOUSES_NEEDING_REPAIR: usize = 6;
+  }
 
-  match World::<City1>::new().run() {
+  const FRAME_DURATION_MS: u64 = 300;
+  match World::<City1>::new().run(FRAME_DURATION_MS) {
     Err(e) => eprintln!("{e}"),
     Ok(list) => println!("{list}"),
   }
 }
 
+/// Stores the result of each finished thread. See [`World.run`].
 #[derive(Debug, Default)]
-struct List(BTreeMap<Id, Notes>);
+pub struct List(BTreeMap<Id, Notes>);
 
 impl<C: WorldConfig + Sync> World<C> {
-  fn run(self: World<C>) -> CdnResult<List> {
+  /// This function spawns new threads for each [`Repairman`] in the world
+  /// to execute their tasks. It then periodically prints the world to the
+  /// standard output with a specified interval in milliseconds defined by
+  /// `frame_duration_ms`.
+  fn run(self: World<C>, frame_duration_ms: u64) -> CdnResult<List> {
     thread::scope(|s| {
       let mut handles = Vec::new();
       let world = &self;
       let barrier = Barrier::new();
-      for id in world.get_repairmans_ids() {
+      for id in world.get_repairmen_ids() {
         let bar = barrier.clone();
-        let h = s.spawn(move || unsafe { Repairman::new(id, bar, world).work_loop() });
+        let h = s.spawn(move || unsafe { Repairman::new(id, bar, world).work() });
         handles.push(h);
       }
 
@@ -76,10 +74,10 @@ impl<C: WorldConfig + Sync> World<C> {
           list.0.insert(id, notes);
         }
 
-        // The purpose of these two lines is to slow down the program for better
-        // visualization of the result, they can be removed otherwise.
+        // These lines slow down the program for better visualization. They
+        // can be removed if not needed.
         barrier.wait();
-        thread::sleep(Duration::from_millis(FRAME_DURATION_MS));
+        thread::sleep(Duration::from_millis(frame_duration_ms));
       }
 
       Ok(list)

@@ -1,10 +1,12 @@
-// A combination of [`std::sync::Barrier`] and [`crossbeam::sync::WaitGroup`]
-
 use std::{
   fmt,
   sync::{Arc, Condvar, Mutex},
 };
 
+/// A combination of [`std::sync::Barrier`] and `crossbeam::sync::WaitGroup`.
+/// It behaves exactly like [`std::sync::Barrier`], but the `num_threads`
+/// is dynamic and can be reduced or increased depending on the number of alive
+/// references, similar to `crossbeam::sync::WaitGroup`.
 pub struct Barrier {
   inner: Arc<Inner>,
 }

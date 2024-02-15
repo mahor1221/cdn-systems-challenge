@@ -18,6 +18,7 @@ enum PathFindingResult {
   UnexploredHouseFound(MoveDirection),
 }
 
+/// An unique identifier for [`Repairman`].
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id(usize);
 
@@ -28,12 +29,13 @@ enum MapStatus {
   Explored,
 }
 
-type FnMove<'a> = Box<dyn Fn(MoveDirection) -> CdnResult<&'a Mutex<House>> + 'a + Send + Sync>;
+type FnMove<'a> = Box<dyn Fn(MoveDirection) -> CdnResult<&'a Mutex<House>> + 'a>;
 
+///
 pub struct Repairman<'a, C: WorldConfig> {
   id: Id,
   world_map: Array2<MapStatus>,
-  notes: Notes,
+  notebook: Notes,
   position: &'a Position<C>,
   house: &'a Mutex<House>,
   barrier: Barrier,
@@ -41,23 +43,34 @@ pub struct Repairman<'a, C: WorldConfig> {
 }
 
 impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
-  /// It's UB if two Repairmans use the same [`Id`]
+  /// Creates a new Repairman. [`Barrier`] is used for communication between
+  /// repairmen. It's undefined behavior if two repairmen use the same `Id`.
   pub unsafe fn new(id: impl Into<Id>, barrier: Barrier, world: &'a World<C>) -> Self {
     let inner = |id| Self {
       id,
       barrier,
+      world_map: Array2::default((C::MAX_LEN_Y, C::MAX_LEN_X)),
+      notebook: Default::default(),
       position: world.get_repairman_position(id),
       house: world.get_repairman_house(id),
+      // The move_repairman method is implemented as a closure to ensure that
+      // each repairman can only modify their own position.
+      // This is done to comply with the challenge rules.
       fn_move: Box::new(move |dir| unsafe { world.move_repairman(id, dir) }),
-      world_map: Array2::default((C::MAX_LEN_Y, C::MAX_LEN_X)),
-      notes: Default::default(),
     };
 
     inner(id.into())
   }
 
-  pub fn work_loop(mut self) -> CdnResult<(Id, Notes)> {
+  /// This is the primary decision-making function of the Repairman.
+  /// It completes its work whenever one of these conditions is met:
+  /// 1. There are no unexplored houses remaining on the map.
+  /// 2. The total number of repaired houses inside the repairman's notebook
+  /// equals the number of houses needing repair.
+  pub fn work(mut self) -> CdnResult<(Id, Notes)> {
     while self.get_total_num_repaired() < C::HOUSES_NEEDING_REPAIR {
+      // To prevent deadlock between multiple repairmen in the same house,
+      // try_lock() is used instead of lock().
       let status = match self.house.try_lock() {
         Ok(house) => house.status,
         Err(_) => {
@@ -79,29 +92,31 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
         UnexploredHouseFound(dir) => self.r#move(dir)?,
         CurrentHouseIsUnexplored => unreachable!(),
         NoUnexploredHouseFound => break,
-        // NoUnexploredHouseFound => self.r#move(random()).unwrap_or(()),
       }
     }
 
-    Ok((self.id, self.notes))
+    Ok((self.id, self.notebook))
   }
 
+  /// Summarizes the number of repaired houses inside the notebook.
   fn get_total_num_repaired(&self) -> usize {
-    self.notes.as_ref().iter().fold(0, |r, (_, i)| r + *i)
+    self.notebook.as_ref().iter().fold(0, |r, (_, i)| r + *i)
   }
 
+  /// Writes the number of repaired houses onto the house.
   fn write_note(&self) -> CdnResult<()> {
-    if let Some(num_repaired) = self.notes.as_ref().get(&self.id) {
+    if let Some(num_repaired) = self.notebook.as_ref().get(&self.id) {
       let mut house = self.house.lock()?;
       house.notes.as_mut().insert(self.id, *num_repaired);
     }
     Ok(())
   }
 
+  /// Reads the notes inside the house and updates the notebook if necessary.
   fn read_notes(&mut self) -> CdnResult<()> {
     let house = self.house.lock()?;
     for (id, num) in house.notes.as_ref() {
-      let local_num = self.notes.as_mut().entry(*id).or_default();
+      let local_num = self.notebook.as_mut().entry(*id).or_default();
       if *local_num < *num {
         *local_num = *num;
       }
@@ -109,6 +124,9 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
     Ok(())
   }
 
+  // /// This function locates the nearest unexplored house on the map using the BFS
+  // algorithm and then returns the direction to that house. The search direction
+  // is randomized.
   fn find_path(&self) -> PathFindingResult {
     let successors = |pos: &Position<C>| {
       use MoveDirection::*;
@@ -155,7 +173,7 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
     let mut house = self.house.lock()?;
     match house.status {
       HouseStatus::NeedsRepair => {
-        let num_repaired = self.notes.as_mut().entry(self.id).or_default();
+        let num_repaired = self.notebook.as_mut().entry(self.id).or_default();
         *num_repaired += 1;
         *house.notes.as_mut().entry(self.id).or_default() = *num_repaired;
         house.status = HouseStatus::Repaired;
@@ -218,7 +236,7 @@ mod test {
     assert!(num.is_none());
 
     const TEST_NUM: usize = 3;
-    man.notes.as_mut().insert(id, TEST_NUM);
+    man.notebook.as_mut().insert(id, TEST_NUM);
     man.write_note().unwrap();
     let num = *man.house.lock().unwrap().notes.as_ref().get(&id).unwrap();
     assert_eq!(TEST_NUM, num);
@@ -235,13 +253,13 @@ mod test {
     let other_id2 = 4.into();
     house.notes.as_mut().insert(other_id1, 7);
     house.notes.as_mut().insert(other_id2, 10);
-    man.notes.as_mut().insert(other_id1, 5);
-    man.notes.as_mut().insert(other_id2, 12);
+    man.notebook.as_mut().insert(other_id1, 5);
+    man.notebook.as_mut().insert(other_id2, 12);
     drop(house);
 
     man.read_notes().unwrap();
-    let num1 = *man.notes.as_ref().get(&other_id1).unwrap();
-    let num2 = *man.notes.as_ref().get(&other_id2).unwrap();
+    let num1 = *man.notebook.as_ref().get(&other_id1).unwrap();
+    let num2 = *man.notebook.as_ref().get(&other_id2).unwrap();
     assert_eq!(7, num1);
     assert_eq!(12, num2);
   }

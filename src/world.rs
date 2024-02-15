@@ -1,3 +1,4 @@
+use self::sync_cell::SyncCell;
 use crate::{
   error::CdnResult,
   position::{MoveDirection, Position},
@@ -14,10 +15,13 @@ use std::{
 
 static HOUSE_NEEDS_REPAIR_STYLE: OnceLock<OwoStyle> = OnceLock::new();
 static HOUSE_REPAIRED_STYLE: OnceLock<OwoStyle> = OnceLock::new();
+
+// `WorldConfig` is implemented as a trait to differentiate between `World`s and
+// `Position`s of different sizes at compile time.
 pub trait WorldConfig {
   const MAX_LEN_X: usize = 7;
   const MAX_LEN_Y: usize = 7;
-  const REPAIRMANS: usize = 4;
+  const REPAIRMEN: usize = 4;
   const HOUSES_NEEDING_REPAIR: usize = 6;
 
   fn house_repaired_style<'a>() -> &'a OwoStyle {
@@ -56,10 +60,14 @@ pub struct House {
 #[derive(Debug)]
 pub struct World<C: WorldConfig> {
   houses: Array2<Mutex<House>>,
-  repairmans: Vec<SyncCell<Position<C>>>,
+  // The unsafe [`SyncCell`] is used to eliminate the need for using Mutexes,
+  // as each `Repairman` will only change their own `Position`.
+  repairmen: Vec<SyncCell<Position<C>>>,
 }
 
 impl<C: WorldConfig> World<C> {
+  /// Creates a new world with houses requiring repair and repairmen scattered
+  /// randomly across it.
   pub fn new() -> Self {
     if C::MAX_LEN_X * C::MAX_LEN_Y < C::HOUSES_NEEDING_REPAIR {
       panic!("MAX_X * MAX_Y must be bigger than HOUSES_NEEDING_REPAIR")
@@ -72,36 +80,36 @@ impl<C: WorldConfig> World<C> {
       house.status = HouseStatus::NeedsRepair;
     }
 
-    let repairmans = (0..C::REPAIRMANS)
+    let repairmen = (0..C::REPAIRMEN)
       .map(|_| SyncCell::new(rng.gen()))
       .collect();
 
-    Self { houses, repairmans }
+    Self { houses, repairmen }
   }
 
-  pub fn get_repairmans_ids(&self) -> impl Iterator<Item = Id> + '_ {
-    self.repairmans.iter().enumerate().map(|(id, _)| id.into())
+  pub fn get_repairmen_ids(&self) -> impl Iterator<Item = Id> + '_ {
+    self.repairmen.iter().enumerate().map(|(id, _)| id.into())
   }
 
-  /// This is safe if [`Self::move_repairman`] is used correctly
+  /// This is safe if [`Self::move_repairman`] is used correctly.
   pub fn get_repairman_position(&self, id: Id) -> &Position<C> {
-    unsafe { &self.repairmans[id].get() }
+    unsafe { &self.repairmen[id].get() }
   }
 
-  /// This is safe if [`Self::move_repairman`] is used correctly
+  /// This is safe if [`Self::move_repairman`] is used correctly.
   pub fn get_repairman_house(&self, id: Id) -> &Mutex<House> {
-    let pos = unsafe { self.repairmans[id].get() };
+    let pos = unsafe { self.repairmen[id].get() };
     &self.houses[pos]
   }
 
-  /// It's UB if two threads use the same [`Id`] without synchronization
+  /// It's UB if two threads use the same [`Id`] without synchronization.
   pub unsafe fn move_repairman<'a>(
     &'a self,
     id: Id,
     direction: MoveDirection,
   ) -> CdnResult<&'a Mutex<House>> {
-    unsafe { self.repairmans[id].get_mut().r#move(direction)? };
-    Ok(&self.houses[self.repairmans[id].get()])
+    unsafe { self.repairmen[id].get_mut().r#move(direction)? };
+    Ok(&self.houses[self.repairmen[id].get()])
   }
 }
 
@@ -110,15 +118,15 @@ impl<C: WorldConfig> Display for World<C> {
     for (y, row) in self.houses.outer_iter().enumerate() {
       for (x, house) in row.iter().enumerate() {
         let pos = Position::<C>::new(x, y);
-        // This is safe if [`Self::move_repairman`] is used correctly
-        let i = unsafe { self.repairmans.iter().filter(|p| *p.get() == pos).count() };
-        let repairmans_num = if i == 0 { "-".into() } else { i.to_string() };
+        // This is safe if [`Self::move_repairman`] is used correctly.
+        let i = unsafe { self.repairmen.iter().filter(|p| *p.get() == pos).count() };
+        let repairmen_num = if i == 0 { "-".into() } else { i.to_string() };
 
         let s = match house.lock().map_err(|_| FmtError)?.status {
           HouseStatus::Repaired => C::house_repaired_style(),
           HouseStatus::NeedsRepair => C::house_needs_repair_style(),
         };
-        write!(f, " {}", repairmans_num.style(*s))?;
+        write!(f, " {}", repairmen_num.style(*s))?;
       }
       f.write_char('\n')?;
     }
@@ -131,7 +139,8 @@ impl<C: WorldConfig> Display for World<C> {
 //  SyncCell
 //
 
-pub use self::sync_cell::SyncCell;
+/// This is a simple wrapper around [`std::cell::UnsafeCell`], which is
+/// zero-cost and adds no overhead to the program.
 mod sync_cell {
   use std::cell::UnsafeCell;
 
@@ -145,13 +154,13 @@ mod sync_cell {
       Self(UnsafeCell::new(value))
     }
 
-    /// It's UB if the inner value gets deallocated while &T is alive
+    /// It's UB if the inner value gets deallocated while &T is alive.
     #[inline(always)]
     pub unsafe fn get(&self) -> &T {
       unsafe { &*self.0.get() }
     }
 
-    /// It's UB if two threads write to the same value without synchronization
+    /// It's UB if two threads write to the same value without synchronization.
     #[inline(always)]
     pub unsafe fn get_mut(&self) -> &mut T {
       &mut *self.0.get()
@@ -196,7 +205,7 @@ pub mod test {
   impl WorldConfig for Tst {
     const MAX_LEN_X: usize = 4;
     const MAX_LEN_Y: usize = 3;
-    const REPAIRMANS: usize = 3;
+    const REPAIRMEN: usize = 3;
     const HOUSES_NEEDING_REPAIR: usize = 6;
 
     fn house_repaired_style<'a>() -> &'a OwoStyle {
@@ -211,7 +220,7 @@ pub mod test {
   impl<C: WorldConfig> Default for World<C> {
     fn default() -> Self {
       Self {
-        repairmans: (0..C::REPAIRMANS).map(|_| Default::default()).collect(),
+        repairmen: (0..C::REPAIRMEN).map(|_| Default::default()).collect(),
         houses: Array2::default((C::MAX_LEN_Y, C::MAX_LEN_X)),
       }
     }
@@ -235,7 +244,7 @@ pub mod test {
     let pos2 = Position::new(1, 0);
 
     let world = World::<Tst>::default();
-    for id in world.get_repairmans_ids() {
+    for id in world.get_repairmen_ids() {
       let repairman_pos = world.get_repairman_position(id);
       assert_eq!(*repairman_pos, pos1);
       unsafe { world.move_repairman(id, MoveDirection::Right).unwrap() };
@@ -247,7 +256,7 @@ pub mod test {
   fn test_display_world() {
     let world = World::<Tst>::default();
     world.houses[[2, 3]].lock().unwrap().status = HouseStatus::NeedsRepair;
-    unsafe { *world.repairmans[1].get_mut() = Position::new(2, 1) };
+    unsafe { *world.repairmen[1].get_mut() = Position::new(2, 1) };
 
     let s = " 2 - - -\n - - 1 -\n - - - \u{1b}[1m-\u{1b}[0m\n";
     assert_eq!(s, &world.to_string());

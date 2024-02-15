@@ -1,5 +1,5 @@
 use crate::{
-  error::{CdnError, CdnResult},
+  error::{CdnErrorKind, CdnResult},
   world::WorldConfig,
 };
 use core::panic;
@@ -12,6 +12,7 @@ use rand::{
 };
 use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
+/// Possible movements of a [`crate::repairman::Repairman`]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveDirection {
   Right,
@@ -22,19 +23,22 @@ pub enum MoveDirection {
 
 // To be able to derive traits without adding unnecessary constraints to
 // the "C: WorldConfig" generic parameter, the non-generic part of Position
-// is separated into PositionInner.
+// is separated.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 struct PositionInner {
   x: usize,
   y: usize,
 }
 
+/// A coordination on the [`crate::world::World`].
 pub struct Position<C: WorldConfig> {
   inner: PositionInner,
   phantom: PhantomData<C>,
 }
 
 impl<C: WorldConfig> Position<C> {
+  /// Creates a new valid Position.
+  /// Panics if x or y are greater than the size of the World.
   pub fn new(x: usize, y: usize) -> Self {
     if x >= C::MAX_LEN_X || y >= C::MAX_LEN_Y {
       panic!("x and y must be smaller than MAX_X and MAX_Y")
@@ -46,6 +50,7 @@ impl<C: WorldConfig> Position<C> {
     }
   }
 
+  /// Returns a set of unique and random `Position`s.
   pub fn new_random_set(rng: &mut ThreadRng, len: usize) -> Vec<Self> {
     let mut numbers: Vec<usize> = (0..C::MAX_LEN_X * C::MAX_LEN_Y).collect();
     numbers.shuffle(rng);
@@ -56,10 +61,7 @@ impl<C: WorldConfig> Position<C> {
       .collect()
   }
 
-  pub fn to_index(&self) -> [usize; 2] {
-    [self.inner.y, self.inner.x]
-  }
-
+  /// Changes the `Position` according to the `MoveDirection`.
   pub fn r#move(&mut self, direction: MoveDirection) -> CdnResult<()> {
     match direction {
       MoveDirection::Right if self.inner.x < C::MAX_LEN_X - 1 => {
@@ -74,11 +76,13 @@ impl<C: WorldConfig> Position<C> {
       MoveDirection::Down if self.inner.y > 0 => {
         self.inner.y -= 1;
       }
-      _ => return Err(CdnError::InvalidMoveDirection),
+      _ => return Err(CdnErrorKind::InvalidMoveDirection.into()),
     }
     Ok(())
   }
 
+  /// Converts two adjacent `Position`s to `MoveDirection`.
+  /// Panics if the two positions are not adjacent.
   pub fn direction_to(&self, other: &Self) -> MoveDirection {
     if self.inner.x.checked_add(1) == Some(other.inner.x) && self.inner.y == other.inner.y {
       MoveDirection::Right
@@ -92,8 +96,15 @@ impl<C: WorldConfig> Position<C> {
       panic!("self and other are not adjacent positions")
     }
   }
+
+  // This is used to implement [`NdIndex`] for Position, enabling indexing of
+  // arrays in the [`ndarray`] crate.
+  const fn to_index(&self) -> [usize; 2] {
+    [self.inner.y, self.inner.x]
+  }
 }
 
+// Generates random `MoveDirection`
 impl Distribution<MoveDirection> for Standard {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> MoveDirection {
     match rng.gen_range(0..=3) {
@@ -105,6 +116,7 @@ impl Distribution<MoveDirection> for Standard {
   }
 }
 
+// Generates random `Position`
 impl<C: WorldConfig> Distribution<Position<C>> for Standard {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Position<C> {
     Position {

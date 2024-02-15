@@ -8,11 +8,16 @@ use std::{
 
 pub type CdnResult<T> = Result<T, CdnError>;
 
-// This type is copied from the error part of std::thread::Result
+// Boxing [CdnErrorKind] reduces the size of [CdnResult] and enhances the
+// overall performance of the program.
+#[derive(Debug)]
+pub struct CdnError(Box<CdnErrorKind>);
+
+// This type is copied from the error part of `std::thread::Result`
 type ThreadError = Box<dyn Any + Send + 'static>;
 
 #[derive(Debug)]
-pub enum CdnError {
+pub enum CdnErrorKind {
   InvalidMoveDirection,
   PoisonError,
   IoError(IoError),
@@ -22,25 +27,30 @@ pub enum CdnError {
 impl Error for CdnError {}
 impl Display for CdnError {
   fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-    write!(f, "{self:?}")
+    write!(f, "{:?}", self.0)
+  }
+}
+
+impl From<CdnErrorKind> for CdnError {
+  fn from(value: CdnErrorKind) -> Self {
+    CdnError(Box::new(value))
   }
 }
 
 impl<E> From<PoisonError<E>> for CdnError {
   fn from(_: PoisonError<E>) -> Self {
-    // PoisonError doesn't implement Send as it consits of a MutexGaurd
-    CdnError::PoisonError
+    CdnErrorKind::PoisonError.into()
   }
 }
 
 impl From<IoError> for CdnError {
   fn from(e: IoError) -> Self {
-    CdnError::IoError(e)
+    CdnErrorKind::IoError(e).into()
   }
 }
 
-impl From<Box<dyn Any + Send>> for CdnError {
-  fn from(e: Box<dyn Any + Send>) -> Self {
-    CdnError::ThreadError(e)
+impl From<ThreadError> for CdnError {
+  fn from(e: ThreadError) -> Self {
+    CdnErrorKind::ThreadError(e).into()
   }
 }
