@@ -31,7 +31,7 @@ use std::{
   time::Duration,
 };
 
-const FRAME_DURATION_MS: u64 = 300;
+const FRAME_DURATION_MS: u64 = 500;
 
 fn main() {
   struct City1;
