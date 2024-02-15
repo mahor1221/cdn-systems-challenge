@@ -2,7 +2,7 @@ use crate::{
   barrier::Barrier,
   error::CdnResult,
   position::{MoveDirection, Position},
-  world::{House, HouseStatus, Notes, SyncCell, World, WorldConfig},
+  world::{House, HouseStatus, Notes, World, WorldConfig},
 };
 use ndarray::Array2;
 use pathfinding::directed::bfs::bfs;
@@ -34,25 +34,55 @@ pub struct Repairman<'a, C: WorldConfig> {
   id: Id,
   world_map: Array2<MapStatus>,
   notes: Notes,
-  position: &'a SyncCell<Position<C>>,
+  position: &'a Position<C>,
   house: &'a Mutex<House>,
   barrier: Barrier,
   fn_move: FnMove<'a>,
 }
 
-impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
-  pub fn new(id: impl Into<Id>, barrier: Barrier, world: &'a World<C>) -> Self {
+impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
+  /// It's UB if two Repairmans use the same [`Id`]
+  pub unsafe fn new(id: impl Into<Id>, barrier: Barrier, world: &'a World<C>) -> Self {
     let inner = |id| Self {
       id,
       barrier,
       position: world.get_repairman_position(id),
       house: world.get_repairman_house(id),
-      fn_move: Box::new(move |dir| world.move_repairman(id, dir)),
+      fn_move: Box::new(move |dir| unsafe { world.move_repairman(id, dir) }),
       world_map: Array2::default((C::MAX_Y, C::MAX_X)),
       notes: Default::default(),
     };
 
     inner(id.into())
+  }
+
+  pub fn work_loop(mut self) -> CdnResult<(Id, Notes)> {
+    while self.get_total_num_repaired() < C::HOUSES_NEEDING_REPAIR {
+      let status = match self.house.try_lock() {
+        Ok(house) => house.status,
+        Err(_) => {
+          self.idle();
+          continue;
+        }
+      };
+
+      match status {
+        HouseStatus::NeedsRepair => self.repair_and_write_note()?,
+        HouseStatus::Repaired => self.write_note()?,
+      }
+
+      self.read_notes()?;
+      self.world_map[self.position] = MapStatus::Explored;
+
+      use PathFindingResult::*;
+      match self.find_path() {
+        CurrentHouseIsUnexplored => unreachable!(),
+        UnexploredHouseFound(dir) => self.r#move(dir)?,
+        NoUnexploredHouseFound => self.r#move(random()).unwrap_or(()),
+      }
+    }
+
+    Ok((self.id, self.notes))
   }
 
   fn get_total_num_repaired(&self) -> usize {
@@ -80,7 +110,7 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
     Ok(())
   }
 
-  fn find_path(&self) -> CdnResult<PathFindingResult> {
+  fn find_path(&self) -> PathFindingResult {
     let successors = |pos: &Position<C>| {
       use MoveDirection::*;
       let mut vec = vec![Right, Left, Up, Down];
@@ -98,35 +128,11 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
     let success = |pos: &Position<C>| self.world_map[pos] == MapStatus::Unexplored;
 
     use PathFindingResult::*;
-    match bfs(self.position.get(), successors, success) {
-      Some(path) if path.len() < 2 => Ok(CurrentHouseIsUnexplored),
-      Some(path) => Ok(UnexploredHouseFound(
-        self.position.get().direction_to(&path[1]),
-      )),
-      None => Ok(NoUnexploredHouseFound),
+    match bfs(self.position, successors, success) {
+      Some(path) if path.len() < 2 => CurrentHouseIsUnexplored,
+      Some(path) => UnexploredHouseFound(self.position.direction_to(&path[1])),
+      None => NoUnexploredHouseFound,
     }
-  }
-
-  pub fn work_loop(mut self) -> CdnResult<(Id, Notes)> {
-    while self.get_total_num_repaired() < C::HOUSES_NEEDING_REPAIR {
-      let status = self.house.lock()?.status;
-      match status {
-        HouseStatus::NeedsRepair => self.repair_and_write_note()?,
-        HouseStatus::Repaired => self.write_note()?,
-      }
-
-      self.read_notes()?;
-      self.world_map[self.position.get()] = MapStatus::Explored;
-
-      use PathFindingResult::*;
-      match self.find_path()? {
-        CurrentHouseIsUnexplored => unreachable!(),
-        UnexploredHouseFound(dir) => self.r#move(dir)?,
-        NoUnexploredHouseFound => self.r#move(random()).unwrap_or(()),
-      }
-    }
-
-    Ok((self.id, self.notes))
   }
 
   //
@@ -139,12 +145,14 @@ impl<'a, C: WorldConfig + Sync + Send> Repairman<'a, C> {
 
   fn r#move(&mut self, direction: MoveDirection) -> CdnResult<()> {
     self.barrier.wait();
+
     self.house = (&self.fn_move)(direction)?;
     Ok(())
   }
 
   fn repair_and_write_note(&mut self) -> CdnResult<()> {
     self.barrier.wait();
+
     let mut house = self.house.lock()?;
     match house.status {
       HouseStatus::NeedsRepair => {
