@@ -89,12 +89,15 @@ impl<C: WorldConfig + Sync> World<C> {
 
 impl Display for List {
   fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    let mut total = 0;
     for (id, notes) in &self.0 {
-      let t = notes.as_ref().iter().fold(0, |t, (_, n)| t + n);
       let r = notes.as_ref().get(&id).cloned().unwrap_or_default();
-      let v: Vec<_> = notes.as_ref().iter().map(|n| *n.1).collect();
-      writeln!(f, "{id:2?}, Repaired({r:2}). Notes({v:?}), Total({t})")?;
+      let n: Vec<_> = notes.as_ref().iter().map(|n| *n.1).collect();
+      let s = notes.as_ref().iter().fold(0, |s, (_, n)| s + n);
+      writeln!(f, "{id:2?}, Repaired({r:2}), Notes({n:?}), NotesSum({s})")?;
+      total += r;
     }
+    writeln!(f, "TotalRepaired({total})")?;
     Ok(())
   }
 }

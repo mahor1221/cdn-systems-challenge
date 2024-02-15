@@ -6,7 +6,7 @@ use crate::{
 };
 use ndarray::Array2;
 use pathfinding::directed::bfs::bfs;
-use rand::{random, seq::SliceRandom, thread_rng};
+use rand::{seq::SliceRandom, thread_rng};
 use std::{
   ops::{Index, IndexMut},
   sync::Mutex,
@@ -76,9 +76,10 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
 
       use PathFindingResult::*;
       match self.find_path() {
-        CurrentHouseIsUnexplored => unreachable!(),
         UnexploredHouseFound(dir) => self.r#move(dir)?,
-        NoUnexploredHouseFound => self.r#move(random()).unwrap_or(()),
+        CurrentHouseIsUnexplored => unreachable!(),
+        NoUnexploredHouseFound => break,
+        // NoUnexploredHouseFound => self.r#move(random()).unwrap_or(()),
       }
     }
 
