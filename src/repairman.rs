@@ -55,7 +55,7 @@ impl<'a, C: WorldConfig + Sync> Repairman<'a, C> {
       notebook: Default::default(),
       position: world.get_repairman_position(id),
       house: world.get_repairman_house(id),
-      // The move_repairman method is implemented as a closure to ensure that
+      // The fn_move method is created as a closure to ensure that
       // each repairman can only modify their own position.
       // This is done to comply with the challenge rules.
       fn_move: Box::new(move |dir| world.move_repairman(id, dir)),

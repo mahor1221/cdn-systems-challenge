@@ -1,5 +1,3 @@
-// TODO: explain why Array2 is used
-
 mod barrier;
 pub mod error;
 pub mod position;
@@ -51,14 +49,13 @@ impl<C: WorldConfig + Sync> World<C> {
   /// to execute their tasks. It then periodically prints the world to the
   /// standard output with a specified interval in milliseconds defined by
   /// `frame_duration_ms`.
-  fn run(self: World<C>, frame_duration_ms: u64) -> CdnResult<List> {
+  fn run(&self, frame_duration_ms: u64) -> CdnResult<List> {
     thread::scope(|s| {
       let mut handles = Vec::new();
-      let world = &self;
       let barrier = Barrier::new();
-      for id in world.get_repairmen_ids() {
+      for id in self.get_repairmen_ids() {
         let bar = barrier.clone();
-        let h = s.spawn(move || unsafe { Repairman::new(id, bar, world).work() });
+        let h = s.spawn(move || unsafe { Repairman::new(id, bar, self).work() });
         handles.push(h);
       }
 
