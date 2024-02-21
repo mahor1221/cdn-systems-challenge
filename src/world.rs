@@ -170,7 +170,7 @@ mod sync_cell {
     /// It's UB if the inner value gets deallocated while &T is alive.
     #[inline(always)]
     pub unsafe fn get(&self) -> &T {
-      unsafe { &*self.0.get() }
+      &*self.0.get()
     }
 
     /// It's UB if two threads write to the same value without synchronization.

@@ -18,6 +18,10 @@ codegen-units = 1
 
 [profile.ci]
 inherits = "dev"
-opt-level = 0
 incremental = false
 debug = false
+
+[profile.perf]
+inherits = "release"
+strip = false
+debug = 1
