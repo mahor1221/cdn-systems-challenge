@@ -1,6 +1,6 @@
 # CDN systems challenge
 - There are X reparimen in a MxN world of houses
-- There are a number of broken houses in the world spreaded randomly
+- There are a number of broken houses in the world spread randomly
 - Each repairman is executed by a thread
 - The only way of communication between repairmen is reading and writing messages in the house they occupy
 - Each repairman may write their message in the same house one at a time
